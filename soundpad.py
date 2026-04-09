@@ -8,8 +8,10 @@ import threading
 import os
 import sys
 import keyboard  # For global hotkey listening
+import json
 
 SAMPLE_RATE = 44100
+PROJECT_FILE = "soundpad_project.json"  # Stores sounds and hotkeys
 
 # ===== LOGGING =====
 def log(msg):
@@ -20,6 +22,43 @@ def log(msg):
         sys.stdout.flush()
 
 # ===== AUDIO ENGINE =====
+def normalize_hotkey(key_str):
+    """Convert user input to keyboard library format"""
+    key_str = key_str.lower().strip()
+    
+    # Map common aliases to keyboard library names
+    aliases = {
+        'fn1': 'f1', 'function1': 'f1', 'func1': 'f1',
+        'fn2': 'f2', 'function2': 'f2', 'func2': 'f2',
+        'fn3': 'f3', 'function3': 'f3', 'func3': 'f3',
+        'fn4': 'f4', 'function4': 'f4', 'func4': 'f4',
+        'fn5': 'f5', 'function5': 'f5', 'func5': 'f5',
+        'fn6': 'f6', 'function6': 'f6', 'func6': 'f6',
+        'fn7': 'f7', 'function7': 'f7', 'func7': 'f7',
+        'fn8': 'f8', 'function8': 'f8', 'func8': 'f8',
+        'fn9': 'f9', 'function9': 'f9', 'func9': 'f9',
+        'fn10': 'f10', 'function10': 'f10', 'func10': 'f10',
+        'fn11': 'f11', 'function11': 'f11', 'func11': 'f11',
+        'fn12': 'f12', 'function12': 'f12', 'func12': 'f12',
+        'space': 'space',
+        'enter': 'enter', 'return': 'enter',
+        'tab': 'tab',
+        'escape': 'escape', 'esc': 'escape',
+        'backspace': 'backspace', 'back': 'backspace',
+        'delete': 'delete', 'del': 'delete',
+        'insert': 'insert', 'ins': 'insert',
+        'home': 'home',
+        'end': 'end',
+        'pageup': 'page up', 'pgup': 'page up',
+        'pagedown': 'page down', 'pgdn': 'page down',
+        'left': 'left', 'leftarrow': 'left',
+        'right': 'right', 'rightarrow': 'right',
+        'up': 'up', 'uparrow': 'up',
+        'down': 'down', 'downarrow': 'down',
+    }
+    
+    return aliases.get(key_str, key_str)
+
 def play_sound(sound):
     log(f"[PLAY] Playing sound with shape: {sound.shape}")
     try:
@@ -35,6 +74,60 @@ def play_sound(sound):
 def start_audio():
     log("[AUDIO] Audio system initialized (using sd.play)")
     # No persistent stream needed - sd.play() handles it automatically
+
+# ===== PERSISTENCE =====
+def save_project(sounds):
+    """Save sounds and hotkeys to JSON file"""
+    try:
+        project_data = []
+        for sound in sounds:
+            project_data.append({
+                "name": sound["name"],
+                "file_path": sound.get("file_path", ""),
+                "hotkey": sound.get("hotkey", None)
+            })
+        
+        with open(PROJECT_FILE, "w") as f:
+            json.dump(project_data, f, indent=2)
+        log(f"[SAVE] Project saved to {PROJECT_FILE} with {len(project_data)} sounds")
+    except Exception as e:
+        log(f"[SAVE] ERROR: {e}")
+
+def load_project():
+    """Load saved sounds and hotkeys from JSON file"""
+    try:
+        if not os.path.exists(PROJECT_FILE):
+            log(f"[LOAD_PROJECT] No saved project found ({PROJECT_FILE})")
+            return []
+        
+        with open(PROJECT_FILE, "r") as f:
+            project_data = json.load(f)
+        
+        log(f"[LOAD_PROJECT] Loaded {len(project_data)} sounds from {PROJECT_FILE}")
+        
+        # Reload sound data from file paths
+        sounds = []
+        for item in project_data:
+            file_path = item.get("file_path", "")
+            if file_path and os.path.exists(file_path):
+                try:
+                    sound_data = load_sound(file_path)
+                    sounds.append({
+                        "name": item["name"],
+                        "data": sound_data,
+                        "hotkey": item.get("hotkey", None),
+                        "file_path": file_path
+                    })
+                    log(f"[LOAD_PROJECT] Loaded sound: {item['name']}")
+                except Exception as e:
+                    log(f"[LOAD_PROJECT] ERROR loading {file_path}: {e}")
+            else:
+                log(f"[LOAD_PROJECT] File not found: {file_path}")
+        
+        return sounds
+    except Exception as e:
+        log(f"[LOAD_PROJECT] ERROR: {e}")
+        return []
 
 def load_sound(file):
     log(f"[LOAD] Loading sound: {file}")
@@ -115,12 +208,22 @@ class SoundpadApp:
         control_frame = tk.Frame(root)
         control_frame.pack(padx=10, pady=5, fill="x")
 
-        tk.Label(control_frame, text="Hotkey:").pack(side="left")
-        self.hotkey_entry = tk.Entry(control_frame, width=15)
+        tk.Label(control_frame, text="Name:").pack(side="left")
+        self.name_entry = tk.Entry(control_frame, width=15)
+        self.name_entry.pack(side="left", padx=5)
+
+        self.rename_btn = tk.Button(control_frame, text="Rename", command=self.rename_sound)
+        self.rename_btn.pack(side="left", padx=2)
+
+        tk.Label(control_frame, text="Hotkey:").pack(side="left", padx=(10, 0))
+        self.hotkey_entry = tk.Entry(control_frame, width=10)
         self.hotkey_entry.pack(side="left", padx=5)
 
-        self.set_hotkey_btn = tk.Button(control_frame, text="Set Hotkey", command=self.set_selected_hotkey)
-        self.set_hotkey_btn.pack(side="left", padx=5)
+        self.record_hotkey_btn = tk.Button(control_frame, text="Record", command=self.record_hotkey)
+        self.record_hotkey_btn.pack(side="left", padx=2)
+
+        self.set_hotkey_btn = tk.Button(control_frame, text="Set", command=self.set_selected_hotkey)
+        self.set_hotkey_btn.pack(side="left", padx=2)
 
         self.play_selected_btn = tk.Button(control_frame, text="Play Selected", command=self.play_selected)
         self.play_selected_btn.pack(side="left", padx=5)
@@ -128,6 +231,17 @@ class SoundpadApp:
         self.remove_btn = tk.Button(control_frame, text="Remove", command=self.remove_selected)
         self.remove_btn.pack(side="left", padx=5)
         
+        # Now load saved project and populate UI
+        self.sounds = load_project()
+        log(f"[UI_INIT] Loaded {len(self.sounds)} sounds from project")
+        
+        # Register hotkeys from loaded sounds
+        for sound in self.sounds:
+            if sound.get("hotkey"):
+                self.hotkey_listeners[sound["hotkey"]] = sound["data"]
+                log(f"[UI_INIT] Registered hotkey: {sound['hotkey']}")
+        
+        self.update_list()
         log("[UI_INIT] SoundpadApp initialized successfully")
 
     def update_list(self):
@@ -136,6 +250,9 @@ class SoundpadApp:
         for sound in self.sounds:
             hotkey_text = f" [{sound['hotkey']}]" if sound["hotkey"] else " [No hotkey]"
             self.list_box.insert(tk.END, sound["name"] + hotkey_text)
+        
+        # Bind selection event to populate name field
+        self.list_box.bind('<<ListboxSelect>>', self.on_sound_selected)
 
     def add_sound(self):
         log("[ADD_SOUND] Opening file dialog...")
@@ -152,14 +269,16 @@ class SoundpadApp:
             sound = {
                 "name": os.path.basename(file),
                 "data": sound_data,
-                "hotkey": None
+                "hotkey": None,
+                "file_path": file  # Store the file path for persistence
             }
 
             self.sounds.append(sound)
             log(f"[ADD_SOUND] Sound added: {sound['name']}")
             
             self.update_list()
-            log("[ADD_SOUND] List updated successfully")
+            save_project(self.sounds)  # Save after adding
+            log("[ADD_SOUND] List updated and project saved")
         except Exception as e:
             log(f"[ADD_SOUND] ERROR after loading: {type(e).__name__}: {e}")
             messagebox.showerror("Error", f"Failed to add sound:\n{e}")
@@ -173,6 +292,78 @@ class SoundpadApp:
             return self.sounds[selection[0]]
         return None
 
+    def on_sound_selected(self, event):
+        """When user clicks a sound in the list, populate the name field"""
+        sound = self.get_selected_sound()
+        if sound:
+            self.name_entry.delete(0, tk.END)
+            self.name_entry.insert(0, sound["name"])
+            log(f"[UI] Sound selected: {sound['name']}")
+
+    def rename_sound(self):
+        """Rename the selected sound"""
+        sound = self.get_selected_sound()
+        if not sound:
+            messagebox.showwarning("Warning", "Please select a sound first")
+            return
+
+        new_name = self.name_entry.get().strip()
+        if not new_name:
+            messagebox.showwarning("Warning", "Name cannot be empty")
+            return
+
+        old_name = sound["name"]
+        sound["name"] = new_name
+        log(f"[RENAME] Changed '{old_name}' to '{new_name}'")
+        
+        self.update_list()
+        save_project(self.sounds)
+        messagebox.showinfo("Success", f"Sound renamed to: {new_name}")
+
+
+    def record_hotkey(self):
+        """Record a hotkey by listening for the next key press"""
+        self.hotkey_entry.delete(0, tk.END)
+        self.hotkey_entry.insert(0, "Press any key...")
+        self.hotkey_entry.config(state='disabled', fg='gray')
+        self.record_hotkey_btn.config(state='disabled')
+        
+        log("[RECORD] Waiting for key press...")
+        
+        def on_key_press(event):
+            """Capture the key that was pressed"""
+            key_name = None
+            
+            # Map Tkinter key names to keyboard library names
+            key_map = {
+                'F1': 'f1', 'F2': 'f2', 'F3': 'f3', 'F4': 'f4', 'F5': 'f5', 'F6': 'f6',
+                'F7': 'f7', 'F8': 'f8', 'F9': 'f9', 'F10': 'f10', 'F11': 'f11', 'F12': 'f12',
+                'space': 'space', 'Return': 'enter', 'Tab': 'tab', 'Escape': 'escape',
+                'BackSpace': 'backspace', 'Delete': 'delete', 'Insert': 'insert',
+                'Home': 'home', 'End': 'end', 'Page_Up': 'page up', 'Page_Down': 'page down',
+                'Left': 'left', 'Right': 'right', 'Up': 'up', 'Down': 'down',
+            }
+            
+            # Get the key name
+            if event.keysym in key_map:
+                key_name = key_map[event.keysym]
+            elif len(event.char) == 1 and event.char.isprintable():
+                key_name = event.char.lower()
+            else:
+                key_name = event.keysym.lower()
+            
+            log(f"[RECORD] Key captured: {key_name}")
+            self.hotkey_entry.config(state='normal', fg='black')
+            self.hotkey_entry.delete(0, tk.END)
+            self.hotkey_entry.insert(0, key_name)
+            self.record_hotkey_btn.config(state='normal')
+            
+            # Unbind after capturing
+            self.root.unbind('<Key>')
+            messagebox.showinfo("Success", f"Hotkey recorded: {key_name}\n\nClick 'Set Hotkey' to confirm.")
+        
+        self.root.bind('<Key>', on_key_press)
+
     def set_selected_hotkey(self):
         """Set hotkey name for the selected sound"""
         sound = self.get_selected_sound()
@@ -185,16 +376,29 @@ class SoundpadApp:
             messagebox.showwarning("Warning", "Please enter a hotkey")
             return
         
-        log(f"[HOTKEY] Setting hotkey name: '{key_str}'")
-        sound["hotkey"] = key_str
+        # Normalize the key name
+        normalized_key = normalize_hotkey(key_str)
+        log(f"[HOTKEY] Input: '{key_str}' -> Normalized: '{normalized_key}'")
+        
+        # Try to verify the key is valid by testing it
+        try:
+            result = keyboard.is_pressed(normalized_key)
+            log(f"[HOTKEY] Key validation successful: '{normalized_key}'")
+        except Exception as e:
+            log(f"[HOTKEY] ERROR - Invalid key: '{normalized_key}': {e}")
+            messagebox.showerror("Error", f"Invalid hotkey: '{key_str}'\n\nUse: f1-f12, space, enter, letters, numbers, etc.")
+            return
+        
+        sound["hotkey"] = normalized_key
         
         # Register this hotkey for listening
-        self.hotkey_listeners[key_str] = sound["data"]
-        log(f"[HOTKEY] Registered listener for key: '{key_str}'")
+        self.hotkey_listeners[normalized_key] = sound["data"]
+        log(f"[HOTKEY] Registered listener for key: '{normalized_key}'")
         
         self.hotkey_entry.delete(0, tk.END)
         self.update_list()
-        messagebox.showinfo("Success", f"Hotkey '{key_str}' set for {sound['name']}")
+        save_project(self.sounds)  # Save after setting hotkey
+        messagebox.showinfo("Success", f"Hotkey '{key_str}' (as '{normalized_key}') set for {sound['name']}")
 
     def _listen_for_hotkeys(self):
         """Background thread that listens for registered hotkeys"""
@@ -222,8 +426,17 @@ class SoundpadApp:
         """Remove the selected sound"""
         selection = self.list_box.curselection()
         if selection:
+            removed_sound = self.sounds[selection[0]]
             del self.sounds[selection[0]]
+            
+            # Remove from hotkey listeners if it has a hotkey
+            if removed_sound.get("hotkey"):
+                self.hotkey_listeners.pop(removed_sound["hotkey"], None)
+                log(f"[REMOVE] Removed hotkey: {removed_sound['hotkey']}")
+            
             self.update_list()
+            save_project(self.sounds)  # Save after removing
+            log(f"[REMOVE] Removed sound: {removed_sound['name']}")
 
 # ===== MAIN =====
 log("=" * 50)
