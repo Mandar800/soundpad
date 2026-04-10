@@ -22,6 +22,18 @@ def log(msg):
         sys.stdout.flush()
 
 # ===== AUDIO ENGINE =====
+play_buffer = []
+play_buffer_lock = threading.Lock()
+
+def get_audio_devices():
+    """Get list of available audio output devices"""
+    devices = sd.query_devices()
+    output_devices = []
+    for i, device in enumerate(devices):
+        if device['max_output_channels'] > 0:  # Output device
+            output_devices.append((i, device['name']))
+    return output_devices
+
 def normalize_hotkey(key_str):
     """Convert user input to keyboard library format"""
     key_str = key_str.lower().strip()
@@ -60,20 +72,79 @@ def normalize_hotkey(key_str):
     return aliases.get(key_str, key_str)
 
 def play_sound(sound):
-    log(f"[PLAY] Playing sound with shape: {sound.shape}")
+    """Queue a sound to be played and mixed with mic"""
+    global play_buffer
+    log(f"[PLAY] Queueing sound with shape: {sound.shape}")
     try:
-        # Use sounddevice's simple play function instead of callbacks
-        sd.play(sound, samplerate=SAMPLE_RATE)
-        log(f"[PLAY] Sound queued successfully")
+        with play_buffer_lock:
+            play_buffer.append(sound.copy())
+            log(f"[PLAY] Sound queued, buffer length: {len(play_buffer)}")
     except Exception as e:
         log(f"[PLAY] ERROR: {e}")
-        messagebox.showerror("Error", f"Failed to play sound:\n{e}")
         import traceback
         traceback.print_exc()
 
-def start_audio():
-    log("[AUDIO] Audio system initialized (using sd.play)")
-    # No persistent stream needed - sd.play() handles it automatically
+def mix_audio_callback(indata, outdata, frames, time, status):
+    """Real-time audio callback: mix mic input with soundpad sounds"""
+    try:
+        if status:
+            log(f"[AUDIO_CB] Status: {status}")
+        
+        # Start with microphone input
+        output = indata[:, 0].copy() if indata is not None else np.zeros(frames, dtype=np.float32)
+        
+        # Mix in queued sounds
+        with play_buffer_lock:
+            new_buffer = []
+            for sound in play_buffer:
+                length = min(len(output), len(sound))
+                output[:length] += sound[:length]
+                
+                if len(sound) > length:
+                    new_buffer.append(sound[length:])
+            play_buffer[:] = new_buffer
+        
+        # Clip to prevent distortion
+        output = np.clip(output, -1, 1)
+        outdata[:, 0] = output
+    except Exception as e:
+        log(f"[AUDIO_CB] ERROR: {e}")
+        outdata.fill(0)
+
+stream = None
+
+def start_audio(output_device_id=None):
+    """Start audio stream that captures mic input and mixes with soundpad sounds"""
+    global stream
+    log(f"[AUDIO] Starting audio stream (device: {output_device_id})...")
+    try:
+        if stream:
+            stream.stop()
+            stream.close()
+        
+        # If no device specified, use default
+        if output_device_id is None:
+            output_device_id = sd.default.device[1]  # Get default output
+        
+        # Check what input device we're using
+        default_input = sd.default.device[0]
+        log(f"[AUDIO] Using output device ID: {output_device_id}")
+        log(f"[AUDIO] Using input device ID: {default_input} (default)")
+        
+        # Create duplex stream: captures mic input, outputs mixed audio
+        stream = sd.Stream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            callback=mix_audio_callback,
+            dtype='float32',
+            device=(None, output_device_id)  # Default input, selected output
+        )
+        stream.start()
+        log(f"[AUDIO] Duplex stream started successfully (mic + sounds)")
+    except Exception as e:
+        log(f"[AUDIO] ERROR: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ===== PERSISTENCE =====
 def save_project(sounds):
@@ -180,6 +251,7 @@ class SoundpadApp:
         self.sounds = []
         self.hotkey_listeners = {}  # Map: hotkey_name -> sound_data
         self.listening = True  # Flag to control listener thread
+        self.selected_device_id = None
         
         # Start hotkey listener thread
         self.listener_thread = threading.Thread(target=self._listen_for_hotkeys, daemon=True)
@@ -230,6 +302,22 @@ class SoundpadApp:
 
         self.remove_btn = tk.Button(control_frame, text="Remove", command=self.remove_selected)
         self.remove_btn.pack(side="left", padx=5)
+        
+        # Device selector frame
+        device_frame = tk.Frame(root)
+        device_frame.pack(padx=10, pady=5, fill="x")
+        
+        tk.Label(device_frame, text="Output Device:").pack(side="left")
+        self.device_var = tk.StringVar(value="Loading...")
+        
+        # Add trace to detect device changes
+        self.device_var.trace('w', lambda name, index, mode: self._on_device_var_changed())
+        
+        self.device_combo = tk.OptionMenu(device_frame, self.device_var, "Loading...")
+        self.device_combo.pack(side="left", padx=5, fill="x", expand=True)
+        
+        # Populate device list
+        self.update_device_list()
         
         # Now load saved project and populate UI
         self.sounds = load_project()
@@ -320,6 +408,44 @@ class SoundpadApp:
         save_project(self.sounds)
         messagebox.showinfo("Success", f"Sound renamed to: {new_name}")
 
+    def update_device_list(self):
+        """Populate dropdown with available audio output devices"""
+        try:
+            devices = get_audio_devices()
+            log(f"[DEVICE] Found {len(devices)} output devices")
+            
+            # Clear existing menu
+            menu = self.device_combo["menu"]
+            menu.delete(0, "end")
+            
+            # Add devices
+            self.device_map = {}  # Map display name to device ID
+            for device_id, device_name in devices:
+                self.device_map[device_name] = device_id
+                menu.add_command(label=device_name, command=lambda d=device_name: self.device_var.set(d))
+                log(f"[DEVICE] Added: {device_name} (ID: {device_id})")
+            
+            # Set default to first device
+            if devices:
+                default_device_name = devices[0][1]
+                self.device_var.set(default_device_name)
+                self.selected_device_id = devices[0][0]
+                log(f"[DEVICE] Default device set to: {default_device_name}")
+        except Exception as e:
+            log(f"[DEVICE] ERROR: {e}")
+
+    def on_device_changed(self, device_name):
+        """Called when user selects a different device"""
+        self.selected_device_id = self.device_map.get(device_name)
+        log(f"[DEVICE] Changed to: {device_name} (ID: {self.selected_device_id})")
+        # Restart audio stream with new device
+        start_audio(self.selected_device_id)
+    
+    def _on_device_var_changed(self):
+        """Internal handler for StringVar trace - runs whenever device_var changes"""
+        device_name = self.device_var.get()
+        if device_name and device_name != "Loading...":
+            self.on_device_changed(device_name)
 
     def record_hotkey(self):
         """Record a hotkey by listening for the next key press"""
@@ -447,7 +573,7 @@ root = tk.Tk()
 app = SoundpadApp(root)
 
 log("[MAIN] Starting audio system...")
-start_audio()
+start_audio(app.selected_device_id)
 
 log("[MAIN] Entering main loop...")
 root.mainloop()
